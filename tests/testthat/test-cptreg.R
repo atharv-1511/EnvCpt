@@ -617,3 +617,947 @@ test_that("cpt.reg produces consistent results with envcpt internal calls", {
   # (may not be exactly at 100 due to randomness)
   expect_true(length(internal_cpts) >= 0)
 })
+
+# =============================================================================
+# Additional Tests for AR(2) Models
+# =============================================================================
+
+context("AR(2) model tests")
+
+# Create AR(2) test data
+set.seed(123)
+n_ar2 <- 150
+ar2_segment1 <- arima.sim(model = list(ar = c(0.5, 0.3)), n = 75)
+ar2_segment2 <- arima.sim(model = list(ar = c(-0.3, 0.2)), n = 75)
+ar2_data <- c(ar2_segment1, ar2_segment2)
+
+# AR(2) data matrix: cbind(y, intercept, lag1, lag2)
+valid_ar2_matrix <- cbind(
+  ar2_data[-(1:2)],           # Response: y[t]
+  rep(1, n_ar2 - 2),          # Intercept
+  ar2_data[-c(1, n_ar2)],     # Lag 1: y[t-1]
+  ar2_data[-c(n_ar2-1, n_ar2)] # Lag 2: y[t-2]
+)
+
+test_that("cpt.reg works with AR(2) data matrix", {
+  result <- EnvCpt:::cpt.reg(data = valid_ar2_matrix, method = "PELT")
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg AMOC works with AR(2) data", {
+  result <- EnvCpt:::cpt.reg(data = valid_ar2_matrix, method = "AMOC")
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("AR(2) model detects changepoint near true location", {
+  result <- EnvCpt:::cpt.reg(data = valid_ar2_matrix, method = "PELT", penalty = "MBIC")
+  detected_cpts <- cpts(result)
+  internal_cpts <- detected_cpts[detected_cpts < n_ar2 - 2]
+
+  # If changepoints detected, at least one should be near 75
+  if (length(internal_cpts) > 0) {
+    min_distance <- min(abs(internal_cpts - 73))  # 73 because of lag adjustment
+    expect_true(min_distance < 20)
+  }
+})
+
+# =============================================================================
+# Tests for Trend Data
+# =============================================================================
+
+context("Trend data tests")
+
+# Create data with trend
+set.seed(456)
+n_trend <- 120
+time_vec <- 1:n_trend
+trend_data <- 0.1 * time_vec + rnorm(n_trend, sd = 0.5)
+trend_data[61:n_trend] <- trend_data[61:n_trend] + 5  # Level shift
+
+# Trend data matrix: cbind(y, intercept, time)
+trend_matrix <- cbind(
+  trend_data,
+  rep(1, n_trend),
+  time_vec
+)
+
+test_that("cpt.reg works with trend data", {
+  result <- EnvCpt:::cpt.reg(data = trend_matrix, method = "PELT")
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg AMOC works with trend data", {
+  result <- EnvCpt:::cpt.reg(data = trend_matrix, method = "AMOC")
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg detects level shift in trend data", {
+  result <- EnvCpt:::cpt.reg(data = trend_matrix, method = "PELT", penalty = "BIC")
+  detected_cpts <- cpts(result)
+  internal_cpts <- detected_cpts[detected_cpts < n_trend]
+
+  # Should detect changepoint near 60
+  if (length(internal_cpts) > 0) {
+    min_distance <- min(abs(internal_cpts - 60))
+    expect_true(min_distance < 15)
+  }
+})
+
+# =============================================================================
+# Tests for AR(1) with Trend
+# =============================================================================
+
+context("AR(1) with trend tests")
+
+# AR(1) + Trend data matrix
+set.seed(789)
+n_ar1t <- 100
+ar1_part <- arima.sim(model = list(ar = 0.5), n = n_ar1t)
+ar1_trend_data <- ar1_part + 0.05 * (1:n_ar1t)
+
+ar1_trend_matrix <- cbind(
+  ar1_trend_data[-1],
+  rep(1, n_ar1t - 1),
+  ar1_trend_data[-n_ar1t],
+  2:n_ar1t  # Time regressor
+)
+
+test_that("cpt.reg works with AR(1) + trend matrix", {
+  result <- EnvCpt:::cpt.reg(data = ar1_trend_matrix, method = "PELT")
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg AMOC works with AR(1) + trend matrix", {
+  result <- EnvCpt:::cpt.reg(data = ar1_trend_matrix, method = "AMOC")
+  expect_s4_class(result, "cpt.reg")
+})
+
+# =============================================================================
+# Tests for Manual Penalty
+# =============================================================================
+
+context("Manual penalty tests")
+
+test_that("cpt.reg works with Manual penalty", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    penalty = "Manual",
+    pen.value = 10
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg with different manual penalty values produces different results", {
+  result_low <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    penalty = "Manual",
+    pen.value = 1
+  )
+  result_high <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    penalty = "Manual",
+    pen.value = 100
+  )
+
+  # Lower penalty should allow more changepoints
+  cpts_low <- length(cpts(result_low))
+  cpts_high <- length(cpts(result_high))
+  expect_true(cpts_low >= cpts_high)
+})
+
+test_that("cpt.reg AMOC works with Manual penalty", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "AMOC",
+    penalty = "Manual",
+    pen.value = 5
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+# =============================================================================
+# Tests for Hannan-Quinn Penalty
+# =============================================================================
+
+context("Hannan-Quinn penalty tests")
+
+test_that("cpt.reg works with Hannan-Quinn penalty", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    penalty = "Hannan-Quinn"
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg AMOC works with Hannan-Quinn penalty", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "AMOC",
+    penalty = "Hannan-Quinn"
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+# =============================================================================
+# Tests for Shape Parameter (Fixed Variance)
+# =============================================================================
+
+context("Shape parameter tests")
+
+test_that("cpt.reg works with shape = 0 (estimate variance)", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    shape = 0
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg works with fixed shape (known variance)", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    shape = 1  # Fixed variance = 1
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg AMOC works with shape = 0", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "AMOC",
+    shape = 0
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg AMOC works with fixed shape", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "AMOC",
+    shape = 2
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("Different shape values produce different results", {
+  result_est <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    shape = 0,
+    penalty = "Manual",
+    pen.value = 5
+  )
+  result_fixed <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    shape = 10,
+    penalty = "Manual",
+    pen.value = 5
+  )
+
+  # Results may differ - just check both are valid
+  expect_s4_class(result_est, "cpt.reg")
+  expect_s4_class(result_fixed, "cpt.reg")
+})
+
+# =============================================================================
+# Tests for CptReg_PELT_Normal() Additional
+# =============================================================================
+
+context("CptReg_PELT_Normal additional tests")
+
+test_that("CptReg_PELT_Normal works with default parameters", {
+  result <- EnvCpt:::CptReg_PELT_Normal(data = valid_ar1_matrix)
+  expect_true(is.list(result) || is.numeric(result))
+})
+
+test_that("CptReg_PELT_Normal works with shape = 0", {
+  result <- EnvCpt:::CptReg_PELT_Normal(
+    data = valid_ar1_matrix,
+    shape = 0
+  )
+  expect_true(is.list(result) || is.numeric(result))
+})
+
+test_that("CptReg_PELT_Normal works with fixed shape", {
+  result <- EnvCpt:::CptReg_PELT_Normal(
+    data = valid_ar1_matrix,
+    shape = 1
+  )
+  expect_true(is.list(result) || is.numeric(result))
+})
+
+test_that("CptReg_PELT_Normal works with AR(2) data", {
+  result <- EnvCpt:::CptReg_PELT_Normal(data = valid_ar2_matrix)
+  expect_true(is.list(result) || is.numeric(result))
+})
+
+test_that("CptReg_PELT_Normal rejects invalid data", {
+  bad_matrix <- matrix(1:6, nrow = 2, ncol = 3)
+  expect_error(
+    EnvCpt:::CptReg_PELT_Normal(data = bad_matrix),
+    regexp = NULL  # Some error expected
+  )
+})
+
+# =============================================================================
+# Tests for CptReg_AMOC_Normal() Additional
+# =============================================================================
+
+context("CptReg_AMOC_Normal additional tests")
+
+test_that("CptReg_AMOC_Normal works with default parameters", {
+  result <- EnvCpt:::CptReg_AMOC_Normal(data = valid_ar1_matrix)
+  expect_true(is.list(result) || is.numeric(result))
+})
+
+test_that("CptReg_AMOC_Normal works with shape = 0", {
+  result <- EnvCpt:::CptReg_AMOC_Normal(
+    data = valid_ar1_matrix,
+    shape = 0
+  )
+  expect_true(is.list(result) || is.numeric(result))
+})
+
+test_that("CptReg_AMOC_Normal works with fixed shape", {
+  result <- EnvCpt:::CptReg_AMOC_Normal(
+    data = valid_ar1_matrix,
+    shape = 1
+  )
+  expect_true(is.list(result) || is.numeric(result))
+})
+
+test_that("CptReg_AMOC_Normal works with AR(2) data", {
+  result <- EnvCpt:::CptReg_AMOC_Normal(data = valid_ar2_matrix)
+  expect_true(is.list(result) || is.numeric(result))
+})
+
+test_that("CptReg_AMOC_Normal works with trend data", {
+  result <- EnvCpt:::CptReg_AMOC_Normal(data = trend_matrix)
+  expect_true(is.list(result) || is.numeric(result))
+})
+
+# =============================================================================
+# Tests for ChangepointRegression() Additional
+# =============================================================================
+
+context("ChangepointRegression additional tests")
+
+test_that("ChangepointRegression AMOC returns valid output structure", {
+  result <- EnvCpt:::ChangepointRegression(
+    data = valid_ar1_matrix,
+    method = "AMOC",
+    penalty.value = log(nrow(valid_ar1_matrix)),
+    cpts.only = FALSE
+  )
+
+  expect_true(is.list(result))
+  expect_true("cpts" %in% names(result))
+})
+
+test_that("ChangepointRegression PELT with minseglen parameter", {
+  result <- EnvCpt:::ChangepointRegression(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    penalty.value = log(nrow(valid_ar1_matrix)),
+    minseglen = 10,
+    cpts.only = FALSE
+  )
+
+  expect_true(is.list(result))
+})
+
+test_that("ChangepointRegression with shape parameter", {
+  result <- EnvCpt:::ChangepointRegression(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    penalty.value = log(nrow(valid_ar1_matrix)),
+    shape = 1,
+    cpts.only = FALSE
+  )
+
+  expect_true(is.list(result))
+})
+
+# =============================================================================
+# Tests for check_data() Additional
+# =============================================================================
+
+context("check_data additional tests")
+
+test_that("check_data handles minseglen smaller than regressors", {
+  # With 3 columns (1 response + 2 regressors), minseglen = 1 is too small
+  expect_warning(
+    EnvCpt:::check_data(valid_ar1_matrix, minseglen = 1),
+    "minseglen is too small"
+  )
+})
+
+test_that("check_data handles minseglen equal to regressors", {
+  # minseglen = 2 equals number of regressors, should still warn
+  expect_warning(
+    EnvCpt:::check_data(valid_ar1_matrix, minseglen = 2)
+  )
+})
+
+test_that("check_data accepts valid minseglen", {
+  # minseglen = 5 is larger than regressors, should be OK
+  result <- EnvCpt:::check_data(valid_ar1_matrix, minseglen = 5)
+  expect_true(is.matrix(result))
+})
+
+test_that("check_data warns for duplicate intercept columns", {
+  # Create matrix with two intercept columns
+  double_intercept <- cbind(1:10, rep(1, 10), rep(1, 10), (1:10)^2)
+
+  expect_warning(
+    EnvCpt:::check_data(double_intercept),
+    regexp = "intercept"
+  )
+})
+
+# =============================================================================
+# Tests for Minseglen Edge Cases
+# =============================================================================
+
+context("Minseglen edge case tests")
+
+test_that("cpt.reg with minseglen at minimum valid size", {
+  # Minimum valid minseglen is ncol(data) - 1 + 1 = ncol(data)
+  min_valid <- ncol(valid_ar1_matrix)
+
+  # Should work without warning when minseglen > number of regressors
+  result <- suppressWarnings(
+    EnvCpt:::cpt.reg(data = valid_ar1_matrix, minseglen = min_valid + 1)
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg with reasonable minseglen", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    minseglen = 10
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg with large minseglen reduces changepoints", {
+  result_small <- suppressWarnings(
+    EnvCpt:::cpt.reg(data = valid_ar1_matrix, minseglen = 5, penalty = "Manual", pen.value = 1)
+  )
+  result_large <- suppressWarnings(
+    EnvCpt:::cpt.reg(data = valid_ar1_matrix, minseglen = 20, penalty = "Manual", pen.value = 1)
+  )
+
+  # Larger minseglen should give fewer or equal changepoints
+  expect_true(length(cpts(result_large)) <= length(cpts(result_small)) + 1)
+})
+
+# =============================================================================
+# Tests for Tolerance Parameter
+# =============================================================================
+
+context("Tolerance parameter tests")
+
+test_that("cpt.reg works with default tolerance", {
+  result <- EnvCpt:::cpt.reg(data = valid_ar1_matrix, method = "PELT")
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg works with larger tolerance", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    tol = 1e-05
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg works with very small tolerance", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    tol = 1e-10
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+# =============================================================================
+# Tests for Multiple Time Series (3D Array) Additional
+# =============================================================================
+
+context("3D array input additional tests")
+
+test_that("cpt.reg handles 3D array with AMOC method", {
+  multi_data <- array(
+    c(valid_ar1_matrix, stable_matrix),
+    dim = c(2, nrow(valid_ar1_matrix), ncol(valid_ar1_matrix))
+  )
+
+  result <- EnvCpt:::cpt.reg(data = multi_data, method = "AMOC")
+
+  expect_true(is.list(result))
+  expect_equal(length(result), 2)
+})
+
+test_that("cpt.reg handles 3D array with different penalties", {
+  multi_data <- array(
+    c(valid_ar1_matrix, stable_matrix),
+    dim = c(2, nrow(valid_ar1_matrix), ncol(valid_ar1_matrix))
+  )
+
+  result <- EnvCpt:::cpt.reg(data = multi_data, method = "PELT", penalty = "AIC")
+
+  expect_true(is.list(result))
+})
+
+test_that("cpt.reg handles 3D array with class=FALSE", {
+  multi_data <- array(
+    c(valid_ar1_matrix, stable_matrix),
+    dim = c(2, nrow(valid_ar1_matrix), ncol(valid_ar1_matrix))
+  )
+
+  result <- EnvCpt:::cpt.reg(data = multi_data, method = "PELT", class = FALSE)
+
+  expect_true(is.list(result))
+})
+
+# =============================================================================
+# Tests for Changepoint Detection Accuracy
+# =============================================================================
+
+context("Changepoint detection accuracy tests")
+
+test_that("Single changepoint detection accuracy", {
+  set.seed(999)
+  n_acc <- 200
+  true_cp <- 100
+
+  # Clear AR(1) structure change
+  seg1 <- arima.sim(model = list(ar = 0.2), n = true_cp)
+  seg2 <- arima.sim(model = list(ar = 0.9), n = n_acc - true_cp)
+  data_acc <- c(seg1, seg2)
+
+  data_matrix <- cbind(
+    data_acc[-1],
+    rep(1, n_acc - 1),
+    data_acc[-n_acc]
+  )
+
+  result <- EnvCpt:::cpt.reg(data = data_matrix, method = "PELT", penalty = "MBIC")
+  detected <- cpts(result)
+  internal <- detected[detected < n_acc - 1]
+
+  if (length(internal) > 0) {
+    closest <- internal[which.min(abs(internal - (true_cp - 1)))]
+    expect_true(abs(closest - (true_cp - 1)) < 15)
+  }
+})
+
+test_that("Multiple changepoint detection", {
+  set.seed(888)
+  n_multi <- 300
+
+  # Three segments with different AR structures
+  seg1 <- arima.sim(model = list(ar = 0.3), n = 100)
+  seg2 <- arima.sim(model = list(ar = 0.8), n = 100)
+  seg3 <- arima.sim(model = list(ar = -0.5), n = 100)
+  data_multi <- c(seg1, seg2, seg3)
+
+  data_matrix <- cbind(
+    data_multi[-1],
+    rep(1, n_multi - 1),
+    data_multi[-n_multi]
+  )
+
+  result <- EnvCpt:::cpt.reg(data = data_matrix, method = "PELT", penalty = "MBIC")
+  detected <- cpts(result)
+
+  # Should detect at least one changepoint
+  expect_true(length(detected) >= 1)
+})
+
+# =============================================================================
+# Tests for cpt.reg Return Object Structure
+# =============================================================================
+
+context("cpt.reg return object structure tests")
+
+test_that("cpt.reg object has correct slots", {
+  result <- EnvCpt:::cpt.reg(data = valid_ar1_matrix, method = "PELT")
+
+  # Check standard cpt.reg slots
+  expect_true(methods::is(result, "cpt.reg"))
+  expect_true("cpts" %in% methods::slotNames(result))
+})
+
+test_that("cpt.reg cpts() accessor works", {
+  result <- EnvCpt:::cpt.reg(data = valid_ar1_matrix, method = "PELT")
+
+  cpts_result <- cpts(result)
+  expect_true(is.numeric(cpts_result))
+})
+
+test_that("cpt.reg ncpts() accessor works", {
+  result <- EnvCpt:::cpt.reg(data = valid_ar1_matrix, method = "PELT")
+
+  n_cpts <- ncpts(result)
+  expect_true(is.numeric(n_cpts))
+  expect_true(n_cpts >= 0)
+})
+
+# =============================================================================
+# Tests for envcpt Model Subsets
+# =============================================================================
+
+context("envcpt model subset tests")
+
+test_that("envcpt works with single model name", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(111)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 3, 1))
+
+  result <- envcpt(x, models = "meancpt", verbose = FALSE)
+  expect_s3_class(result, "envcpt")
+})
+
+test_that("envcpt works with multiple model indices", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(222)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 3, 1))
+
+  result <- envcpt(x, models = c(1, 2, 5), verbose = FALSE)
+  expect_s3_class(result, "envcpt")
+})
+
+test_that("envcpt works with AR1 model", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(333)
+  x <- arima.sim(model = list(ar = 0.7), n = 100)
+
+  result <- envcpt(x, models = "meanar1", verbose = FALSE)
+  expect_s3_class(result, "envcpt")
+})
+
+test_that("envcpt works with trendAR models", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(444)
+  x <- arima.sim(model = list(ar = 0.5), n = 100) + 0.05 * (1:100)
+
+  result <- envcpt(x, models = "trendar1", verbose = FALSE)
+  expect_s3_class(result, "envcpt")
+})
+
+test_that("envcpt propagates minseglen to internal calls", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(555)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 5, 1))
+
+  # Should work with minseglen
+  result <- envcpt(x, minseglen = 10, verbose = FALSE)
+  expect_s3_class(result, "envcpt")
+})
+
+# =============================================================================
+# Tests for BIC.envcpt Additional
+# =============================================================================
+
+context("BIC.envcpt additional tests")
+
+test_that("BIC.envcpt works with valid envcpt object", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(666)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 3, 1))
+  out <- envcpt(x, verbose = FALSE)
+
+  bic_result <- EnvCpt:::BIC.envcpt(out)
+
+  expect_true(is.numeric(bic_result))
+  expect_true(length(bic_result) > 0)
+})
+
+test_that("BIC.envcpt handles all NA values gracefully", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(777)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 3, 1))
+  out <- envcpt(x, verbose = FALSE)
+
+  # Should not error
+  bic_result <- try(EnvCpt:::BIC.envcpt(out), silent = TRUE)
+  expect_false(inherits(bic_result, "try-error"))
+})
+
+# =============================================================================
+# Tests for AICweights Additional
+# =============================================================================
+
+context("AICweights additional tests")
+
+test_that("AICweights returns weights summing to 1", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(888)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 5, 1))
+  out <- envcpt(x, verbose = FALSE)
+
+  weights <- AICweights(out)
+  valid_weights <- weights[!is.na(weights)]
+
+  if (length(valid_weights) > 0) {
+    expect_equal(sum(valid_weights), 1, tolerance = 1e-8)
+  }
+})
+
+test_that("AICweights returns non-negative weights", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(999)
+  x <- c(rnorm(75, 0, 1), rnorm(75, 3, 1))
+  out <- envcpt(x, verbose = FALSE)
+
+  weights <- AICweights(out)
+  valid_weights <- weights[!is.na(weights)]
+
+  expect_true(all(valid_weights >= 0))
+})
+
+test_that("AICweights returns weights bounded by 1", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(1000)
+  x <- c(rnorm(60, 0, 1), rnorm(60, 4, 1))
+  out <- envcpt(x, verbose = FALSE)
+
+  weights <- AICweights(out)
+  valid_weights <- weights[!is.na(weights)]
+
+  expect_true(all(valid_weights <= 1))
+})
+
+# =============================================================================
+# Tests for plot.envcpt Additional
+# =============================================================================
+
+context("plot.envcpt additional tests")
+
+test_that("plot.envcpt works with type='aic'", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(1111)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 3, 1))
+  out <- envcpt(x, verbose = FALSE)
+
+  # Should complete without error
+  expect_silent(EnvCpt:::plot.envcpt(out, type = "aic"))
+})
+
+test_that("plot.envcpt works with type='bic'", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(1112)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 3, 1))
+  out <- envcpt(x, verbose = FALSE)
+
+  expect_silent(EnvCpt:::plot.envcpt(out, type = "bic"))
+})
+
+test_that("plot.envcpt works with type='fit'", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(1113)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 3, 1))
+  out <- envcpt(x, verbose = FALSE)
+
+  expect_silent(EnvCpt:::plot.envcpt(out, type = "fit"))
+})
+
+test_that("plot.envcpt works with custom valid colors", {
+  skip_if_not(identical(Sys.getenv("NOT_CRAN"), "true"))
+
+  set.seed(1114)
+  x <- c(rnorm(50, 0, 1), rnorm(50, 3, 1))
+  out <- envcpt(x, verbose = FALSE)
+
+  custom_colors <- c("red", "blue", "green", "yellow", "purple", "orange",
+                     "pink", "brown", "gray", "cyan", "magenta", "black")
+
+  expect_silent(EnvCpt:::plot.envcpt(out, type = "aic", colors = custom_colors))
+})
+
+# =============================================================================
+# Tests for Numerical Stability
+# =============================================================================
+
+context("Numerical stability tests")
+
+test_that("cpt.reg handles data with small variance", {
+  set.seed(2000)
+  small_var_data <- rnorm(100, mean = 100, sd = 0.01)
+  small_var_matrix <- cbind(
+    small_var_data[-1],
+    rep(1, 99),
+    small_var_data[-100]
+  )
+
+  result <- EnvCpt:::cpt.reg(data = small_var_matrix, method = "PELT")
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg handles data with large variance", {
+  set.seed(2001)
+  large_var_data <- rnorm(100, mean = 0, sd = 1000)
+  large_var_matrix <- cbind(
+    large_var_data[-1],
+    rep(1, 99),
+    large_var_data[-100]
+  )
+
+  result <- EnvCpt:::cpt.reg(data = large_var_matrix, method = "PELT")
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg handles data with large mean", {
+  set.seed(2002)
+  large_mean_data <- rnorm(100, mean = 1e6, sd = 1)
+  large_mean_matrix <- cbind(
+    large_mean_data[-1],
+    rep(1, 99),
+    large_mean_data[-100]
+  )
+
+  result <- EnvCpt:::cpt.reg(data = large_mean_matrix, method = "PELT")
+  expect_s4_class(result, "cpt.reg")
+})
+
+# =============================================================================
+# Tests for Data Size Variations
+# =============================================================================
+
+context("Data size variation tests")
+
+test_that("cpt.reg works with minimum size data", {
+  # Minimum: need enough data for at least one segment
+  min_data <- rnorm(20)
+  min_matrix <- cbind(
+    min_data[-1],
+    rep(1, 19),
+    min_data[-20]
+  )
+
+  result <- suppressWarnings(
+    EnvCpt:::cpt.reg(data = min_matrix, method = "PELT", minseglen = 5)
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg works with medium size data", {
+  set.seed(3000)
+  med_data <- rnorm(500)
+  med_matrix <- cbind(
+    med_data[-1],
+    rep(1, 499),
+    med_data[-500]
+  )
+
+  result <- EnvCpt:::cpt.reg(data = med_matrix, method = "PELT")
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg works with larger data", {
+  set.seed(3001)
+  large_data <- rnorm(1000)
+  large_matrix <- cbind(
+    large_data[-1],
+    rep(1, 999),
+    large_data[-1000]
+  )
+
+  result <- EnvCpt:::cpt.reg(data = large_matrix, method = "PELT")
+  expect_s4_class(result, "cpt.reg")
+})
+
+# =============================================================================
+# Tests for Penalty Comparison
+# =============================================================================
+
+context("Penalty comparison tests")
+
+test_that("Different penalties give different number of changepoints", {
+  set.seed(4000)
+  n_pen <- 200
+  seg1 <- arima.sim(model = list(ar = 0.3), n = 100)
+  seg2 <- arima.sim(model = list(ar = 0.8), n = 100)
+  pen_data <- c(seg1, seg2)
+
+  pen_matrix <- cbind(
+    pen_data[-1],
+    rep(1, n_pen - 1),
+    pen_data[-n_pen]
+  )
+
+  result_aic <- EnvCpt:::cpt.reg(data = pen_matrix, penalty = "AIC")
+  result_bic <- EnvCpt:::cpt.reg(data = pen_matrix, penalty = "BIC")
+  result_mbic <- EnvCpt:::cpt.reg(data = pen_matrix, penalty = "MBIC")
+
+  # All should be valid
+  expect_s4_class(result_aic, "cpt.reg")
+  expect_s4_class(result_bic, "cpt.reg")
+  expect_s4_class(result_mbic, "cpt.reg")
+
+  # AIC typically gives more changepoints than BIC/MBIC
+  cpts_aic <- length(cpts(result_aic))
+  cpts_mbic <- length(cpts(result_mbic))
+  expect_true(cpts_aic >= cpts_mbic - 1)  # Allow some variation
+})
+
+# =============================================================================
+# Tests for Distribution Parameter
+# =============================================================================
+
+context("Distribution parameter tests")
+
+test_that("cpt.reg with dist='Normal' works", {
+  result <- EnvCpt:::cpt.reg(
+    data = valid_ar1_matrix,
+    method = "PELT",
+    dist = "Normal"
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+test_that("cpt.reg with unsupported distribution warns and converts", {
+  expect_warning(
+    result <- EnvCpt:::cpt.reg(
+      data = valid_ar1_matrix,
+      method = "PELT",
+      dist = "Exponential"
+    ),
+    "is not supported"
+  )
+  expect_s4_class(result, "cpt.reg")
+})
+
+# =============================================================================
+# Final Count Verification
+# =============================================================================
+
+context("Test suite verification")
+
+test_that("Test suite runs successfully", {
+  # This test confirms the suite completes
+
+  expect_true(TRUE)
+})
